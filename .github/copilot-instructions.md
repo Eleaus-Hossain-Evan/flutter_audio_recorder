@@ -4,12 +4,11 @@ A concise guide for AI coding agents to be productive in this repository. For de
 
 ## Quick context (what this app is)
 
-- Flutter app using **Riverpod** (state), **GoRouter** (navigation), **Dio+Retrofit** for networking, and **flutter_flavorizr** for multi‑flavor builds.
+- Flutter app using **Riverpod** (state), with **flutter_hooks** for UI level state management.
 
 ## High‑value patterns (read these files)
 
 - Feature structure: `lib/features/<feature>/{application,domain,infrastructure,presentation}` — interfaces in `domain/` (I\*), impls in `infrastructure/`, providers in `application/`.
-- Network: use `DioService.run(request: ..., parse: (d) => Model.fromMap(d))` and central `lib/core/network/dio_client.dart`.
 - State: `@riverpod` providers (sometimes `@Riverpod(keepAlive: true)`); provider codegen requires build_runner.
 - Routing: `lib/core/router/router.dart` uses GoRouter with Riverpod; see `routing-navigation.instructions.md` for StatefulShellRoute and auth redirect patterns.
 - Models: project uses the **Dart Data Class Generator** (VSCode) for model boilerplate — do NOT assume `json_serializable` for models; Riverpod/provider generation still uses `build_runner`.
