@@ -7,14 +7,14 @@ part of 'audio_recorder_provider.dart';
 // **************************************************************************
 
 String _$audioRecorderRepositoryHash() =>
-    r'3ea1e8e3f2592d5758af594584428382c43d7893';
+    r'ec197c1bf9dbf03f7001e39f35057f23ef789ea5';
 
 /// Provider for audio recorder repository.
 ///
 /// Copied from [audioRecorderRepository].
 @ProviderFor(audioRecorderRepository)
 final audioRecorderRepositoryProvider =
-    AutoDisposeProvider<AudioRecorderRepository>.internal(
+    AutoDisposeProvider<IAudioRecorderRepo>.internal(
       audioRecorderRepository,
       name: r'audioRecorderRepositoryProvider',
       debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
@@ -26,9 +26,8 @@ final audioRecorderRepositoryProvider =
 
 @Deprecated('Will be removed in 3.0. Use Ref instead')
 // ignore: unused_element
-typedef AudioRecorderRepositoryRef =
-    AutoDisposeProviderRef<AudioRecorderRepository>;
-String _$audioRecorderHash() => r'791a20ba6e80e7a5bab02b59e28419433743262b';
+typedef AudioRecorderRepositoryRef = AutoDisposeProviderRef<IAudioRecorderRepo>;
+String _$audioRecorderHash() => r'3a256af409bb83f7911bfbd700c00d9235b9ef18';
 
 /// Audio recorder notifier that manages recording state.
 ///

@@ -1,11 +1,11 @@
-import 'package:flutter_audio_recorder/features/audio_recorder/domain/entities/recording_entity.dart';
-import 'package:flutter_audio_recorder/features/audio_recorder/domain/repositories/audio_recorder_repository.dart';
-import 'package:flutter_audio_recorder/features/audio_recorder/presentation/providers/audio_recorder_provider.dart';
-import 'package:flutter_audio_recorder/features/audio_recorder/presentation/providers/audio_recorder_state.dart';
+import 'package:flutter_audio_recorder/features/audio_recorder/application/audio_recorder_provider.dart';
+import 'package:flutter_audio_recorder/features/audio_recorder/application/audio_recorder_state.dart';
+import 'package:flutter_audio_recorder/features/audio_recorder/domain/i_audio_recorder_repo.dart';
+import 'package:flutter_audio_recorder/features/audio_recorder/domain/models/recording_model.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-class MockAudioRecorderRepository implements AudioRecorderRepository {
+class MockAudioRecorderRepository implements IAudioRecorderRepo {
   bool permissionGranted = true;
   bool shouldThrow = false;
 
@@ -21,9 +21,9 @@ class MockAudioRecorderRepository implements AudioRecorderRepository {
   }
 
   @override
-  Future<RecordingEntity> stopRecording() async {
+  Future<RecordingModel> stopRecording() async {
     if (shouldThrow) throw Exception('Stop error');
-    return RecordingEntity(
+    return RecordingModel(
       id: 'test_1',
       filePath: '/path/to/test_1.m4a',
       fileName: 'test_1.m4a',
@@ -34,10 +34,10 @@ class MockAudioRecorderRepository implements AudioRecorderRepository {
   }
 
   @override
-  Future<List<RecordingEntity>> getRecordings() async {
+  Future<List<RecordingModel>> getRecordings() async {
     if (shouldThrow) throw Exception('Get error');
     return [
-      RecordingEntity(
+      RecordingModel(
         id: 'test_1',
         filePath: '/path/to/test_1.m4a',
         fileName: 'test_1.m4a',

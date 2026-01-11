@@ -1,8 +1,8 @@
-/// Recording metadata entity.
+/// Recording metadata model.
 ///
 /// Represents a single audio recording with its metadata.
 /// Generated using Dart Data Class Generator.
-class RecordingEntity {
+class RecordingModel {
   /// Unique identifier for the recording.
   final String id;
 
@@ -21,7 +21,7 @@ class RecordingEntity {
   /// Creation timestamp.
   final DateTime createdAt;
 
-  const RecordingEntity({
+  const RecordingModel({
     required this.id,
     required this.filePath,
     required this.fileName,
@@ -30,9 +30,9 @@ class RecordingEntity {
     required this.createdAt,
   });
 
-  /// Creates a [RecordingEntity] from a map (platform channel response).
-  factory RecordingEntity.fromMap(Map<String, dynamic> map) {
-    return RecordingEntity(
+  /// Creates a [RecordingModel] from a map (platform channel response).
+  factory RecordingModel.fromMap(Map<String, dynamic> map) {
+    return RecordingModel(
       id: map['id'] as String,
       filePath: map['filePath'] as String,
       fileName: map['fileName'] as String,
@@ -55,7 +55,7 @@ class RecordingEntity {
   }
 
   /// Creates a copy with optional field replacements.
-  RecordingEntity copyWith({
+  RecordingModel copyWith({
     String? id,
     String? filePath,
     String? fileName,
@@ -63,7 +63,7 @@ class RecordingEntity {
     int? sizeBytes,
     DateTime? createdAt,
   }) {
-    return RecordingEntity(
+    return RecordingModel(
       id: id ?? this.id,
       filePath: filePath ?? this.filePath,
       fileName: fileName ?? this.fileName,
@@ -77,7 +77,7 @@ class RecordingEntity {
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
 
-    return other is RecordingEntity &&
+    return other is RecordingModel &&
         other.id == id &&
         other.filePath == filePath &&
         other.fileName == fileName &&

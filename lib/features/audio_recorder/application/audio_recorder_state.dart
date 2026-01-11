@@ -1,4 +1,4 @@
-import '../../domain/entities/recording_entity.dart';
+import '../domain/models/recording_model.dart';
 
 /// Recorder status enum.
 enum RecorderStatus {
@@ -18,7 +18,7 @@ enum RecorderStatus {
 /// State for audio recorder.
 class AudioRecorderState {
   final RecorderStatus status;
-  final List<RecordingEntity> recordings;
+  final List<RecordingModel> recordings;
   final String? errorMessage;
 
   const AudioRecorderState({
@@ -38,7 +38,7 @@ class AudioRecorderState {
   /// Creates a copy with optional field replacements.
   AudioRecorderState copyWith({
     RecorderStatus? status,
-    List<RecordingEntity>? recordings,
+    List<RecordingModel>? recordings,
     String? errorMessage,
   }) {
     return AudioRecorderState(

@@ -1,52 +1,60 @@
 import 'package:flutter/services.dart';
 
-import '../../domain/entities/recording_entity.dart';
+import '../../../core/exceptions/audio_exceptions.dart';
+import '../domain/i_audio_recorder_datasource.dart';
+import '../domain/models/recording_model.dart';
 
 /// Method channel datasource for audio recording.
 ///
 /// Wraps platform channel calls and converts raw responses to typed data.
-class AudioRecorderMethodChannel {
+class AudioRecorderMethodChannel implements IAudioRecorderDataSource {
   static const _channel = MethodChannel('com.example.audio_recorder/methods');
 
   /// Requests microphone permission.
+  @override
   Future<bool> requestPermission() async {
     try {
       final result = await _channel.invokeMethod<bool>('requestPermission');
       return result ?? false;
     } on PlatformException catch (e) {
-      throw Exception('Failed to request permission: ${e.message}');
+      throw AudioPermissionException(
+        'Failed to request permission: ${e.message}',
+      );
     }
   }
 
   /// Starts audio recording.
+  @override
   Future<void> startRecording() async {
     try {
       await _channel.invokeMethod<void>('startRecording');
     } on PlatformException catch (e) {
-      throw Exception('Failed to start recording: ${e.message}');
+      throw AudioRecordingException('Failed to start recording: ${e.message}');
     }
   }
 
   /// Stops audio recording and returns metadata.
-  Future<RecordingEntity> stopRecording() async {
+  @override
+  Future<RecordingModel> stopRecording() async {
     try {
       final result = await _channel.invokeMethod<Map<Object?, Object?>>(
         'stopRecording',
       );
       if (result == null) {
-        throw Exception('stopRecording returned null');
+        throw const AudioRecordingException('stopRecording returned null');
       }
 
       // Convert Map<Object?, Object?> to Map<String, dynamic>
       final map = Map<String, dynamic>.from(result);
-      return RecordingEntity.fromMap(map);
+      return RecordingModel.fromMap(map);
     } on PlatformException catch (e) {
-      throw Exception('Failed to stop recording: ${e.message}');
+      throw AudioRecordingException('Failed to stop recording: ${e.message}');
     }
   }
 
   /// Retrieves all saved recordings.
-  Future<List<RecordingEntity>> getRecordings() async {
+  @override
+  Future<List<RecordingModel>> getRecordings() async {
     try {
       final result = await _channel.invokeMethod<List<Object?>>(
         'getRecordings',
@@ -58,11 +66,11 @@ class AudioRecorderMethodChannel {
       return result
           .whereType<Map<Object?, Object?>>()
           .map(
-            (item) => RecordingEntity.fromMap(Map<String, dynamic>.from(item)),
+            (item) => RecordingModel.fromMap(Map<String, dynamic>.from(item)),
           )
           .toList();
     } on PlatformException catch (e) {
-      throw Exception('Failed to get recordings: ${e.message}');
+      throw AudioFileException('Failed to get recordings: ${e.message}');
     }
   }
 }

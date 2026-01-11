@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../providers/audio_recorder_provider.dart';
-import '../providers/audio_recorder_state.dart';
+import '../../application/audio_recorder_provider.dart';
+import '../../application/audio_recorder_state.dart';
+import '../../domain/models/recording_model.dart';
 
 /// Audio recorder page with record/stop controls and recordings list.
 class RecorderPage extends HookConsumerWidget {
@@ -11,6 +12,7 @@ class RecorderPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final recorderState = ref.watch(audioRecorderProvider);
+    final notifier = ref.read(audioRecorderProvider.notifier);
 
     return Scaffold(
       appBar: AppBar(
@@ -18,54 +20,108 @@ class RecorderPage extends HookConsumerWidget {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: () {
-              ref.read(audioRecorderProvider.notifier).refresh();
-            },
+            onPressed: notifier.refresh,
             tooltip: 'Refresh recordings',
           ),
         ],
       ),
       body: Column(
         children: [
-          // Recording controls
-          _buildRecordingControls(context, ref, recorderState),
-
-          // Error message
+          _RecordingControlsWidget(
+            status: recorderState.status,
+            statusText: _statusText(recorderState.status),
+            onStart: () => _handleStart(ref),
+            onStop: notifier.stop,
+          ),
           if (recorderState.errorMessage != null)
-            _buildErrorBanner(recorderState.errorMessage!),
-
-          // Recordings list
-          Expanded(child: _buildRecordingsList(recorderState)),
+            _ErrorBannerWidget(message: recorderState.errorMessage!),
+          Expanded(
+            child: _RecordingsListWidget(
+              recordings: recorderState.recordings,
+              formatDateTime: _formatDateTime,
+              onShowDetails: (recording) =>
+                  _showRecordingDetails(context, recording),
+            ),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildRecordingControls(
-    BuildContext context,
-    WidgetRef ref,
-    AudioRecorderState state,
-  ) {
-    final isRecording = state.status == RecorderStatus.recording;
+  Future<void> _handleStart(WidgetRef ref) async {
+    final notifier = ref.read(audioRecorderProvider.notifier);
+    final granted = await notifier.requestPermission();
+    if (granted) {
+      await notifier.start();
+    }
+  }
 
-    return Container(
+  void _showRecordingDetails(BuildContext context, RecordingModel recording) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Recording Details'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _DetailRowWidget(label: 'ID', value: recording.id),
+            _DetailRowWidget(label: 'File', value: recording.fileName),
+            _DetailRowWidget(label: 'Path', value: recording.filePath),
+            _DetailRowWidget(
+              label: 'Duration',
+              value: '${recording.durationMs ~/ 1000}s',
+            ),
+            _DetailRowWidget(
+              label: 'Size',
+              value: '${recording.sizeBytes ~/ 1024}KB',
+            ),
+            _DetailRowWidget(
+              label: 'Created',
+              value: _formatDateTime(recording.createdAt),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RecordingControlsWidget extends StatelessWidget {
+  const _RecordingControlsWidget({
+    required this.status,
+    required this.statusText,
+    required this.onStart,
+    required this.onStop,
+  });
+
+  final RecorderStatus status;
+  final String statusText;
+  final Future<void> Function() onStart;
+  final Future<void> Function() onStop;
+
+  @override
+  Widget build(BuildContext context) {
+    final isRecording = status == RecorderStatus.recording;
+
+    return Padding(
       padding: const EdgeInsets.all(24),
       child: Column(
         children: [
-          // Status indicator
-          Text(
-            _getStatusText(state.status),
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
+          Text(statusText, style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 24),
-
-          // Record/Stop button
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               if (!isRecording)
                 ElevatedButton.icon(
-                  onPressed: () => _onRecordPressed(ref),
+                  onPressed: onStart,
                   icon: const Icon(Icons.mic),
                   label: const Text('Start Recording'),
                   style: ElevatedButton.styleFrom(
@@ -77,9 +133,7 @@ class RecorderPage extends HookConsumerWidget {
                 )
               else
                 ElevatedButton.icon(
-                  onPressed: () {
-                    ref.read(audioRecorderProvider.notifier).stop();
-                  },
+                  onPressed: onStop,
                   icon: const Icon(Icons.stop),
                   label: const Text('Stop Recording'),
                   style: ElevatedButton.styleFrom(
@@ -97,8 +151,15 @@ class RecorderPage extends HookConsumerWidget {
       ),
     );
   }
+}
 
-  Widget _buildErrorBanner(String message) {
+class _ErrorBannerWidget extends StatelessWidget {
+  const _ErrorBannerWidget({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
@@ -108,101 +169,94 @@ class RecorderPage extends HookConsumerWidget {
           Icon(Icons.error_outline, color: Colors.red.shade900),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(message, style: TextStyle(color: Colors.red.shade900)),
+            child: Text(
+              message,
+              style: TextStyle(color: Colors.red.shade900),
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
         ],
       ),
     );
   }
+}
 
-  Widget _buildRecordingsList(AudioRecorderState state) {
-    if (state.recordings.isEmpty) {
+class _RecordingsListWidget extends StatelessWidget {
+  const _RecordingsListWidget({
+    required this.recordings,
+    required this.formatDateTime,
+    required this.onShowDetails,
+  });
+
+  final List<RecordingModel> recordings;
+  final String Function(DateTime) formatDateTime;
+  final void Function(RecordingModel) onShowDetails;
+
+  @override
+  Widget build(BuildContext context) {
+    if (recordings.isEmpty) {
       return const Center(child: Text('No recordings yet'));
     }
 
     return ListView.builder(
-      itemCount: state.recordings.length,
+      itemCount: recordings.length,
       itemBuilder: (context, index) {
-        final recording = state.recordings[index];
-        final durationSeconds = recording.durationMs ~/ 1000;
-        final sizeKb = recording.sizeBytes ~/ 1024;
-
-        return ListTile(
-          leading: const Icon(Icons.audiotrack),
-          title: Text(recording.fileName),
-          subtitle: Text(
-            '${durationSeconds}s • ${sizeKb}KB\n${_formatDateTime(recording.createdAt)}',
-          ),
-          isThreeLine: true,
-          trailing: IconButton(
-            icon: const Icon(Icons.info_outline),
-            onPressed: () {
-              _showRecordingDetails(context, recording);
-            },
-          ),
+        final recording = recordings[index];
+        return _RecordingListItemWidget(
+          key: ValueKey(recording.id),
+          recording: recording,
+          subtitle: _subtitleText(recording, formatDateTime),
+          onShowDetails: () => onShowDetails(recording),
         );
       },
     );
   }
 
-  String _getStatusText(RecorderStatus status) {
-    switch (status) {
-      case RecorderStatus.idle:
-        return 'Ready';
-      case RecorderStatus.recording:
-        return '🔴 Recording...';
-      case RecorderStatus.stopped:
-        return 'Recording saved';
-      case RecorderStatus.error:
-        return 'Error';
-    }
+  String _subtitleText(
+    RecordingModel recording,
+    String Function(DateTime) fmt,
+  ) {
+    final durationSeconds = recording.durationMs ~/ 1000;
+    final sizeKb = recording.sizeBytes ~/ 1024;
+    return '${durationSeconds}s • ${sizeKb}KB\n${fmt(recording.createdAt)}';
   }
+}
 
-  String _formatDateTime(DateTime dateTime) {
-    return '${dateTime.year}-${dateTime.month.toString().padLeft(2, '0')}-${dateTime.day.toString().padLeft(2, '0')} '
-        '${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}';
-  }
+class _RecordingListItemWidget extends StatelessWidget {
+  const _RecordingListItemWidget({
+    super.key,
+    required this.recording,
+    required this.subtitle,
+    required this.onShowDetails,
+  });
 
-  Future<void> _onRecordPressed(WidgetRef ref) async {
-    // Request permission first
-    final granted = await ref
-        .read(audioRecorderProvider.notifier)
-        .requestPermission();
+  final RecordingModel recording;
+  final String subtitle;
+  final VoidCallback onShowDetails;
 
-    if (granted) {
-      // Start recording
-      await ref.read(audioRecorderProvider.notifier).start();
-    }
-  }
-
-  void _showRecordingDetails(BuildContext context, recording) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Recording Details'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildDetailRow('ID', recording.id),
-            _buildDetailRow('File', recording.fileName),
-            _buildDetailRow('Path', recording.filePath),
-            _buildDetailRow('Duration', '${recording.durationMs ~/ 1000}s'),
-            _buildDetailRow('Size', '${recording.sizeBytes ~/ 1024}KB'),
-            _buildDetailRow('Created', _formatDateTime(recording.createdAt)),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
-          ),
-        ],
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: const Icon(Icons.audiotrack),
+      title: Text(recording.fileName, overflow: TextOverflow.ellipsis),
+      subtitle: Text(subtitle),
+      isThreeLine: true,
+      trailing: IconButton(
+        icon: const Icon(Icons.info_outline),
+        onPressed: onShowDetails,
       ),
     );
   }
+}
 
-  Widget _buildDetailRow(String label, String value) {
+class _DetailRowWidget extends StatelessWidget {
+  const _DetailRowWidget({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -220,4 +274,28 @@ class RecorderPage extends HookConsumerWidget {
       ),
     );
   }
+}
+
+String _statusText(RecorderStatus status) {
+  switch (status) {
+    case RecorderStatus.idle:
+      return 'Ready';
+    case RecorderStatus.recording:
+      return '🔴 Recording...';
+    case RecorderStatus.stopped:
+      return 'Recording saved';
+    case RecorderStatus.error:
+      return 'Error';
+  }
+}
+
+String _formatDateTime(DateTime dateTime) {
+  final date =
+      '${dateTime.year}-'
+      '${dateTime.month.toString().padLeft(2, '0')}-'
+      '${dateTime.day.toString().padLeft(2, '0')}';
+  final time =
+      '${dateTime.hour.toString().padLeft(2, '0')}:'
+      '${dateTime.minute.toString().padLeft(2, '0')}';
+  return '$date $time';
 }

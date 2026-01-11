@@ -1,6 +1,6 @@
 import 'package:flutter/services.dart';
-import 'package:flutter_audio_recorder/features/audio_recorder/data/datasources/audio_recorder_method_channel.dart';
-import 'package:flutter_audio_recorder/features/audio_recorder/domain/entities/recording_entity.dart';
+import 'package:flutter_audio_recorder/features/audio_recorder/domain/models/recording_model.dart';
+import 'package:flutter_audio_recorder/features/audio_recorder/infrastructure/audio_recorder_method_channel.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -81,10 +81,10 @@ void main() {
       expect(log, <Matcher>[isMethodCall('startRecording', arguments: null)]);
     });
 
-    test('stopRecording returns RecordingEntity', () async {
+    test('stopRecording returns RecordingModel', () async {
       final result = await dataSource.stopRecording();
 
-      expect(result, isA<RecordingEntity>());
+      expect(result, isA<RecordingModel>());
       expect(result.id, 'test_123');
       expect(result.fileName, 'test_123.m4a');
       expect(result.durationMs, 5000);
@@ -92,10 +92,10 @@ void main() {
       expect(log, <Matcher>[isMethodCall('stopRecording', arguments: null)]);
     });
 
-    test('getRecordings returns list of RecordingEntity', () async {
+    test('getRecordings returns list of RecordingModel', () async {
       final result = await dataSource.getRecordings();
 
-      expect(result, isA<List<RecordingEntity>>());
+      expect(result, isA<List<RecordingModel>>());
       expect(result.length, 1);
       expect(result.first.id, 'test_123');
       expect(log, <Matcher>[isMethodCall('getRecordings', arguments: null)]);
