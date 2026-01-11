@@ -1,5 +1,5 @@
+import 'package:flutter_audio_recorder/core/constant/recorder_status.dart';
 import 'package:flutter_audio_recorder/features/audio_recorder/application/audio_recorder_provider.dart';
-import 'package:flutter_audio_recorder/features/audio_recorder/application/audio_recorder_state.dart';
 import 'package:flutter_audio_recorder/features/audio_recorder/domain/i_audio_recorder_repo.dart';
 import 'package:flutter_audio_recorder/features/audio_recorder/domain/models/recording_model.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
