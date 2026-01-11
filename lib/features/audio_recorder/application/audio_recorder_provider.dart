@@ -1,6 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../../core/constant/recorder_status.dart';
 import '../../../core/exceptions/audio_exceptions.dart';
 import '../domain/i_audio_recorder_repo.dart';
 import '../domain/models/recording_model.dart';

@@ -1,19 +1,5 @@
+import '../../../core/constant/recorder_status.dart';
 import '../domain/models/recording_model.dart';
-
-/// Recorder status enum.
-enum RecorderStatus {
-  /// Not recording, idle state.
-  idle,
-
-  /// Currently recording.
-  recording,
-
-  /// Recording stopped.
-  stopped,
-
-  /// Error state.
-  error,
-}
 
 /// State for audio recorder.
 class AudioRecorderState {
