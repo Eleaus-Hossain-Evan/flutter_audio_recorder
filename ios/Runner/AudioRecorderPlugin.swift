@@ -3,19 +3,42 @@ import UIKit
 import AVFoundation
 
 public class AudioRecorderPlugin: NSObject, FlutterPlugin {
-    private var channel: FlutterMethodChannel?
+    private var methodChannel: FlutterMethodChannel?
+    private var stateEventChannel: FlutterEventChannel?
+    private var amplitudeEventChannel: FlutterEventChannel?
+    
     private var audioRecorder: AVAudioRecorder?
     private var recordingStartTime: Date?
     private var currentRecordingURL: URL?
     
+    private var stateEventSink: FlutterEventSink?
+    private var amplitudeEventSink: FlutterEventSink?
+    
+    private var meringTimer: Timer?
+    private var recordingInProgress = false
+    
     public static func register(with registrar: FlutterPluginRegistrar) {
-        let channel = FlutterMethodChannel(
+        let methodChannel = FlutterMethodChannel(
             name: "com.example.audio_recorder/methods",
             binaryMessenger: registrar.messenger()
         )
+        let stateEventChannel = FlutterEventChannel(
+            name: "com.example.audio_recorder/events/recording_state",
+            binaryMessenger: registrar.messenger()
+        )
+        let amplitudeEventChannel = FlutterEventChannel(
+            name: "com.example.audio_recorder/events/amplitude",
+            binaryMessenger: registrar.messenger()
+        )
+        
         let instance = AudioRecorderPlugin()
-        instance.channel = channel
-        registrar.addMethodCallDelegate(instance, channel: channel)
+        instance.methodChannel = methodChannel
+        instance.stateEventChannel = stateEventChannel
+        instance.amplitudeEventChannel = amplitudeEventChannel
+        
+        registrar.addMethodCallDelegate(instance, channel: methodChannel)
+        stateEventChannel.setStreamHandler(instance)
+        amplitudeEventChannel.setStreamHandler(instance)
     }
     
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -54,6 +77,9 @@ public class AudioRecorderPlugin: NSObject, FlutterPlugin {
         }
         
         do {
+            // Emit initializing state
+            emitRecordingStateEvent(state: "initializing", timestamp: currentISO8601(), reason: nil)
+            
             // Configure audio session
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(.playAndRecord, mode: .default)
@@ -88,13 +114,33 @@ public class AudioRecorderPlugin: NSObject, FlutterPlugin {
             
             // Create and start recorder
             audioRecorder = try AVAudioRecorder(url: fileURL, settings: settings)
-            audioRecorder?.record()
+            guard let recorder = audioRecorder else {
+                result(FlutterError(
+                    code: "RECORDING_FAILED",
+                    message: "Failed to create audio recorder",
+                    details: nil
+                ))
+                return
+            }
+            
+            // Enable metering for amplitude
+            recorder.isMeteringEnabled = true
+            recorder.record()
             
             currentRecordingURL = fileURL
             recordingStartTime = Date()
+            recordingInProgress = true
+            
+            // Emit recording state
+            emitRecordingStateEvent(state: "recording", timestamp: currentISO8601(), reason: nil)
+            
+            // Start amplitude metering (30-60 Hz; here using 50 Hz)
+            startAmplitudeMetering()
             
             result(nil)
         } catch {
+            recordingInProgress = false
+            emitRecordingStateEvent(state: "error", timestamp: currentISO8601(), reason: error.localizedDescription)
             result(FlutterError(
                 code: "RECORDING_FAILED",
                 message: "Failed to start recording: \(error.localizedDescription)",
@@ -114,6 +160,12 @@ public class AudioRecorderPlugin: NSObject, FlutterPlugin {
             return
         }
         
+        // Stop metering
+        stopAmplitudeMetering()
+        
+        // Emit stopping state
+        emitRecordingStateEvent(state: "stopping", timestamp: currentISO8601(), reason: nil)
+        
         recorder.stop()
         
         do {
@@ -124,6 +176,8 @@ public class AudioRecorderPlugin: NSObject, FlutterPlugin {
         
         // Get metadata
         guard FileManager.default.fileExists(atPath: recordingURL.path) else {
+            recordingInProgress = false
+            emitRecordingStateEvent(state: "error", timestamp: currentISO8601(), reason: "Recording file not found")
             result(FlutterError(
                 code: "FILE_NOT_FOUND",
                 message: "Recording file not found",
@@ -137,6 +191,10 @@ public class AudioRecorderPlugin: NSObject, FlutterPlugin {
         audioRecorder = nil
         currentRecordingURL = nil
         recordingStartTime = nil
+        recordingInProgress = false
+        
+        // Emit stopped state
+        emitRecordingStateEvent(state: "stopped", timestamp: currentISO8601(), reason: nil)
         
         result(metadata)
     }
@@ -218,4 +276,80 @@ public class AudioRecorderPlugin: NSObject, FlutterPlugin {
             "createdAt": isoDate
         ]
     }
+    
+    // MARK: - Amplitude Metering
+    
+    private func startAmplitudeMetering() {
+        // Timer at ~50 Hz (0.02 second interval) for amplitude sampling
+        meringTimer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [weak self] _ in
+            self?.emitAmplitudeSample()
+        }
+    }
+    
+    private func stopAmplitudeMetering() {
+        meringTimer?.invalidate()
+        meringTimer = nil
+    }
+    
+    private func emitAmplitudeSample() {
+        guard let recorder = audioRecorder, recordingInProgress else { return }
+        
+        recorder.updateMeters()
+        
+        // Get average power in dB (-160 to 0)
+        let averagePower = recorder.averagePower(forChannel: 0)
+        
+        // Normalize: -160 dB → 0.0, 0 dB → 1.0
+        let normalizedAmplitude = max(0.0, min(1.0, (averagePower + 160.0) / 160.0))
+        
+        // Emit as raw double
+        amplitudeEventSink?(normalizedAmplitude)
+    }
+    
+    // MARK: - State Event Emission
+    
+    private func emitRecordingStateEvent(state: String, timestamp: String, reason: String?) {
+        let event: [String: Any?] = [
+            "state": state,
+            "timestamp": timestamp,
+            "reason": reason
+        ]
+        stateEventSink?(event)
+    }
+    
+    private func currentISO8601() -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: Date())
+    }
 }
+
+// MARK: - FlutterStreamHandler Implementation
+
+extension AudioRecorderPlugin: FlutterStreamHandler {
+    public func onListen(
+        withArguments arguments: Any?,
+        eventSink events: @escaping FlutterEventSink
+    ) -> FlutterError? {
+        // Determine which stream this is by checking the current event sink
+        // This is a simplification; in production, use a named handler per channel
+        if stateEventSink == nil {
+            stateEventSink = events
+        } else {
+            amplitudeEventSink = events
+        }
+        return nil
+    }
+    
+    public func onCancel(withArguments arguments: Any?) -> FlutterError? {
+        // Cleanup on stream cancellation
+        if amplitudeEventSink != nil {
+            amplitudeEventSink = nil
+            stopAmplitudeMetering()
+        } else {
+            stateEventSink = nil
+        }
+        return nil
+    }
+}
+

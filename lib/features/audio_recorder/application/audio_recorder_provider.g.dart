@@ -11,6 +11,9 @@ String _$audioRecorderRepositoryHash() =>
 
 /// Provider for audio recorder repository.
 ///
+/// Returns both command and streaming capabilities through the unified [AudioRecorderRepo].
+/// Casting to [IAudioRecorderStreamRepository] is safe since the implementation provides both interfaces.
+///
 /// Copied from [audioRecorderRepository].
 @ProviderFor(audioRecorderRepository)
 final audioRecorderRepositoryProvider =
@@ -30,6 +33,10 @@ typedef AudioRecorderRepositoryRef = AutoDisposeProviderRef<IAudioRecorderRepo>;
 String _$audioRecorderHash() => r'3a256af409bb83f7911bfbd700c00d9235b9ef18';
 
 /// Audio recorder notifier that manages recording state.
+///
+/// Coordinates:
+/// - Command execution (requestPermission, startRecording, stopRecording)
+/// - Stream lifecycle (streams auto-cancel on stop/error)
 ///
 /// Copied from [AudioRecorder].
 @ProviderFor(AudioRecorder)

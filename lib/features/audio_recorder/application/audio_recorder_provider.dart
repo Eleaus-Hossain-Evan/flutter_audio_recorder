@@ -12,12 +12,19 @@ import 'audio_recorder_state.dart';
 part 'audio_recorder_provider.g.dart';
 
 /// Provider for audio recorder repository.
+///
+/// Returns both command and streaming capabilities through the unified [AudioRecorderRepo].
+/// Casting to [IAudioRecorderStreamRepository] is safe since the implementation provides both interfaces.
 @riverpod
 IAudioRecorderRepo audioRecorderRepository(Ref ref) {
   return AudioRecorderRepo(AudioRecorderMethodChannel());
 }
 
 /// Audio recorder notifier that manages recording state.
+///
+/// Coordinates:
+/// - Command execution (requestPermission, startRecording, stopRecording)
+/// - Stream lifecycle (streams auto-cancel on stop/error)
 @riverpod
 class AudioRecorder extends _$AudioRecorder {
   @override
@@ -76,6 +83,10 @@ class AudioRecorder extends _$AudioRecorder {
   }
 
   /// Starts recording.
+  ///
+  /// On success, emits recording state and amplitude streams
+  /// (via [recordingStateStreamProvider] and [amplitudeStreamProvider]).
+  /// Streams auto-cancel when [stop] is called or on error.
   Future<void> start() async {
     try {
       final repository = ref.read(audioRecorderRepositoryProvider);
@@ -99,6 +110,8 @@ class AudioRecorder extends _$AudioRecorder {
   }
 
   /// Stops recording and adds the new recording to the list.
+  ///
+  /// Streams are canceled by the native layer when recording stops.
   Future<void> stop() async {
     try {
       final repository = ref.read(audioRecorderRepositoryProvider);

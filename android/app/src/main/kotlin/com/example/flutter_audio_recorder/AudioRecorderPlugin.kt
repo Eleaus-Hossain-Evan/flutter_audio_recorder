@@ -7,11 +7,14 @@ import android.media.MediaMetadataRetriever
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
+import android.os.HandlerThread
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry
@@ -20,9 +23,11 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, ActivityAware,
-    PluginRegistry.RequestPermissionsResultListener {
+    PluginRegistry.RequestPermissionsResultListener, EventChannel.StreamHandler {
 
     private lateinit var channel: MethodChannel
+    private var stateEventChannel: EventChannel? = null
+    private var amplitudeEventChannel: EventChannel? = null
     private var context: Context? = null
     private var activityBinding: ActivityPluginBinding? = null
     
@@ -31,20 +36,38 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
     private var recordingStartTime: Long = 0
     
     private var permissionResult: MethodChannel.Result? = null
+    
+    private var stateEventSink: EventChannel.EventSink? = null
+    private var amplitudeEventSink: EventChannel.EventSink? = null
+    
+    private var amplitudeMeteringThread: HandlerThread? = null
+    private var amplitudeMeteringHandler: Handler? = null
+    private var recordingInProgress = false
 
     companion object {
         private const val CHANNEL_NAME = "com.example.audio_recorder/methods"
+        private const val STATE_EVENT_CHANNEL_NAME = "com.example.audio_recorder/events/recording_state"
+        private const val AMPLITUDE_EVENT_CHANNEL_NAME = "com.example.audio_recorder/events/amplitude"
         private const val PERMISSION_REQUEST_CODE = 1001
+        private const val AMPLITUDE_POLLING_INTERVAL_MS = 20L  // ~50 Hz
     }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
         channel = MethodChannel(binding.binaryMessenger, CHANNEL_NAME)
         channel.setMethodCallHandler(this)
+        
+        stateEventChannel = EventChannel(binding.binaryMessenger, STATE_EVENT_CHANNEL_NAME)
+        stateEventChannel?.setStreamHandler(this)
+        
+        amplitudeEventChannel = EventChannel(binding.binaryMessenger, AMPLITUDE_EVENT_CHANNEL_NAME)
+        amplitudeEventChannel?.setStreamHandler(this)
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
+        stateEventChannel?.setStreamHandler(null)
+        amplitudeEventChannel?.setStreamHandler(null)
         context = null
     }
 
@@ -130,6 +153,9 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
         }
 
         try {
+            // Emit initializing state
+            emitRecordingStateEvent(state = "initializing", reason = null)
+            
             // Generate unique filename
             val timestamp = System.currentTimeMillis()
             val uuid = UUID.randomUUID().toString().substring(0, 8)
@@ -159,8 +185,18 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
                 start()
             }
 
+            recordingInProgress = true
+            
+            // Emit recording state
+            emitRecordingStateEvent(state = "recording", reason = null)
+            
+            // Start amplitude metering
+            startAmplitudeMetering()
+
             result.success(null)
         } catch (e: Exception) {
+            recordingInProgress = false
+            emitRecordingStateEvent(state = "error", reason = e.message)
             result.error("RECORDING_FAILED", "Failed to start recording: ${e.message}", null)
         }
     }
@@ -175,12 +211,20 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
         }
 
         try {
+            // Stop amplitude metering
+            stopAmplitudeMetering()
+            
+            // Emit stopping state
+            emitRecordingStateEvent(state = "stopping", reason = null)
+            
             recorder.stop()
             recorder.release()
             mediaRecorder = null
 
             val file = File(recordingPath)
             if (!file.exists()) {
+                recordingInProgress = false
+                emitRecordingStateEvent(state = "error", reason = "Recording file not found")
                 result.error("FILE_NOT_FOUND", "Recording file not found", null)
                 return
             }
@@ -188,12 +232,18 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
             // Get metadata
             val metadata = getRecordingMetadata(file)
             currentRecordingPath = null
+            recordingInProgress = false
+            
+            // Emit stopped state
+            emitRecordingStateEvent(state = "stopped", reason = null)
             
             result.success(metadata)
         } catch (e: Exception) {
             mediaRecorder?.release()
             mediaRecorder = null
             currentRecordingPath = null
+            recordingInProgress = false
+            emitRecordingStateEvent(state = "error", reason = e.message)
             result.error("STOP_FAILED", "Failed to stop recording: ${e.message}", null)
         }
     }
@@ -253,4 +303,87 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
             "createdAt" to isoFormatter.format(createdAt)
         )
     }
+
+    // MARK: - Amplitude Metering
+    
+    private fun startAmplitudeMetering() {
+        amplitudeMeteringThread = HandlerThread("AmplitudeMeteringThread")
+        amplitudeMeteringThread?.start()
+        
+        amplitudeMeteringHandler = Handler(amplitudeMeteringThread!!.looper)
+        scheduleAmplitudePolling()
+    }
+    
+    private fun stopAmplitudeMetering() {
+        amplitudeMeteringHandler?.removeCallbacksAndMessages(null)
+        amplitudeMeteringThread?.quitSafely()
+        amplitudeMeteringThread = null
+        amplitudeMeteringHandler = null
+    }
+    
+    private fun scheduleAmplitudePolling() {
+        amplitudeMeteringHandler?.postDelayed({
+            if (recordingInProgress && mediaRecorder != null) {
+                emitAmplitudeSample()
+                scheduleAmplitudePolling()  // Reschedule for next poll
+            }
+        }, AMPLITUDE_POLLING_INTERVAL_MS)
+    }
+    
+    private fun emitAmplitudeSample() {
+        val recorder = mediaRecorder ?: return
+        
+        try {
+            // Get max amplitude (0-32767)
+            val maxAmplitude = recorder.maxAmplitude.toDouble()
+            
+            // Normalize: 0 → 0.0, 32767 → 1.0
+            val normalizedAmplitude = (maxAmplitude / 32767.0).coerceIn(0.0, 1.0)
+            
+            // Emit as raw double
+            amplitudeEventSink?.success(normalizedAmplitude)
+        } catch (e: Exception) {
+            // Silently skip if recorder state is invalid
+        }
+    }
+    
+    // MARK: - State Event Emission
+    
+    private fun emitRecordingStateEvent(state: String, reason: String?) {
+        val event = mapOf(
+            "state" to state,
+            "timestamp" to getCurrentISO8601(),
+            "reason" to reason
+        )
+        stateEventSink?.success(event)
+    }
+    
+    private fun getCurrentISO8601(): String {
+        val isoFormatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }
+        return isoFormatter.format(Date())
+    }
+    
+    // MARK: - EventChannel.StreamHandler Implementation
+    
+    override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
+        // Determine which stream this is based on which sink is null
+        if (stateEventSink == null) {
+            stateEventSink = events
+        } else {
+            amplitudeEventSink = events
+        }
+    }
+    
+    override fun onCancel(arguments: Any?) {
+        // Cleanup on stream cancellation
+        if (amplitudeEventSink != null) {
+            amplitudeEventSink = null
+            stopAmplitudeMetering()
+        } else {
+            stateEventSink = null
+        }
+    }
 }
+
