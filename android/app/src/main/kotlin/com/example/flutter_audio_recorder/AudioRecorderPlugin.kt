@@ -3,6 +3,7 @@ package com.example.flutter_audio_recorder
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.media.MediaPlayer
 import android.media.MediaMetadataRetriever
 import android.media.MediaRecorder
 import android.os.Build
@@ -28,6 +29,9 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
     private lateinit var channel: MethodChannel
     private var stateEventChannel: EventChannel? = null
     private var amplitudeEventChannel: EventChannel? = null
+    private var playbackChannel: MethodChannel? = null
+    private var playbackStateEventChannel: EventChannel? = null
+    private var playbackPositionEventChannel: EventChannel? = null
     private var context: Context? = null
     private var activityBinding: ActivityPluginBinding? = null
     
@@ -39,17 +43,28 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
     
     private var stateEventSink: EventChannel.EventSink? = null
     private var amplitudeEventSink: EventChannel.EventSink? = null
+    private var playbackStateEventSink: EventChannel.EventSink? = null
+    private var playbackPositionEventSink: EventChannel.EventSink? = null
     
     private var amplitudeMeteringThread: HandlerThread? = null
     private var amplitudeMeteringHandler: Handler? = null
     private var recordingInProgress = false
 
+    private var mediaPlayer: MediaPlayer? = null
+    private var playbackFilePath: String? = null
+    private var playbackPositionThread: HandlerThread? = null
+    private var playbackPositionHandler: Handler? = null
+
     companion object {
         private const val CHANNEL_NAME = "com.example.audio_recorder/methods"
         private const val STATE_EVENT_CHANNEL_NAME = "com.example.audio_recorder/events/recording_state"
         private const val AMPLITUDE_EVENT_CHANNEL_NAME = "com.example.audio_recorder/events/amplitude"
+        private const val PLAYBACK_CHANNEL_NAME = "com.example.audio_player/methods"
+        private const val PLAYBACK_STATE_EVENT_CHANNEL_NAME = "com.example.audio_player/events/state"
+        private const val PLAYBACK_POSITION_EVENT_CHANNEL_NAME = "com.example.audio_player/events/position"
         private const val PERMISSION_REQUEST_CODE = 1001
         private const val AMPLITUDE_POLLING_INTERVAL_MS = 20L  // ~50 Hz
+        private const val PLAYBACK_POSITION_INTERVAL_MS = 100L
     }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -62,12 +77,29 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
         
         amplitudeEventChannel = EventChannel(binding.binaryMessenger, AMPLITUDE_EVENT_CHANNEL_NAME)
         amplitudeEventChannel?.setStreamHandler(this)
+
+        playbackChannel = MethodChannel(binding.binaryMessenger, PLAYBACK_CHANNEL_NAME)
+        playbackChannel?.setMethodCallHandler(this)
+
+        playbackStateEventChannel =
+            EventChannel(binding.binaryMessenger, PLAYBACK_STATE_EVENT_CHANNEL_NAME)
+        playbackStateEventChannel?.setStreamHandler(PlaybackStateStreamHandler(this))
+
+        playbackPositionEventChannel =
+            EventChannel(binding.binaryMessenger, PLAYBACK_POSITION_EVENT_CHANNEL_NAME)
+        playbackPositionEventChannel?.setStreamHandler(PlaybackPositionStreamHandler(this))
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
+        playbackChannel?.setMethodCallHandler(null)
         stateEventChannel?.setStreamHandler(null)
         amplitudeEventChannel?.setStreamHandler(null)
+        playbackStateEventChannel?.setStreamHandler(null)
+        playbackPositionEventChannel?.setStreamHandler(null)
+        stopPlaybackPositionUpdates()
+        mediaPlayer?.release()
+        mediaPlayer = null
         context = null
     }
 
@@ -97,6 +129,13 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
             "startRecording" -> startRecording(result)
             "stopRecording" -> stopRecording(result)
             "getRecordings" -> getRecordings(result)
+            "loadLocal" -> loadLocal(call, result)
+            "play" -> play(result)
+            "pause" -> pause(result)
+            "stop" -> stop(result)
+            "seekTo" -> seekTo(call, result)
+            "setVolume" -> setVolume(call, result)
+            "setSpeed" -> setSpeed(call, result)
             else -> result.notImplemented()
         }
     }
@@ -385,5 +424,244 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
             stateEventSink = null
         }
     }
-}
 
+    private fun loadLocal(call: MethodCall, result: MethodChannel.Result) {
+        val filePath = call.argument<String>("filePath")
+        if (filePath.isNullOrBlank()) {
+            result.error("INVALID_ARGS", "filePath is required", null)
+            return
+        }
+
+        try {
+            stopPlaybackPositionUpdates()
+            mediaPlayer?.release()
+            mediaPlayer = null
+
+            playbackFilePath = filePath
+            emitPlaybackStateEvent(state = "loading", reason = null)
+
+            val player = MediaPlayer().apply {
+                setDataSource(filePath)
+                setOnCompletionListener {
+                    stopPlaybackPositionUpdates()
+                    emitPlaybackPositionEvent()
+                    emitPlaybackStateEvent(state = "completed", reason = null)
+                }
+                prepare()
+            }
+            mediaPlayer = player
+            emitPlaybackStateEvent(state = "paused", reason = null)
+            emitPlaybackPositionEvent()
+            result.success(null)
+        } catch (e: Exception) {
+            emitPlaybackStateEvent(state = "error", reason = e.message)
+            result.error("LOAD_FAILED", "Failed to load audio: ${e.message}", null)
+        }
+    }
+
+    private fun play(result: MethodChannel.Result) {
+        val player = mediaPlayer
+        if (player == null) {
+            result.error("NO_PLAYER", "No audio loaded", null)
+            return
+        }
+        try {
+            player.start()
+            emitPlaybackStateEvent(state = "playing", reason = null)
+            startPlaybackPositionUpdates()
+            result.success(null)
+        } catch (e: Exception) {
+            emitPlaybackStateEvent(state = "error", reason = e.message)
+            result.error("PLAY_FAILED", "Failed to start playback: ${e.message}", null)
+        }
+    }
+
+    private fun pause(result: MethodChannel.Result) {
+        val player = mediaPlayer
+        if (player == null) {
+            result.error("NO_PLAYER", "No audio loaded", null)
+            return
+        }
+        try {
+            if (player.isPlaying) {
+                player.pause()
+            }
+            stopPlaybackPositionUpdates()
+            emitPlaybackStateEvent(state = "paused", reason = null)
+            emitPlaybackPositionEvent()
+            result.success(null)
+        } catch (e: Exception) {
+            emitPlaybackStateEvent(state = "error", reason = e.message)
+            result.error("PAUSE_FAILED", "Failed to pause playback: ${e.message}", null)
+        }
+    }
+
+    private fun stop(result: MethodChannel.Result) {
+        val player = mediaPlayer
+        if (player == null) {
+            result.error("NO_PLAYER", "No audio loaded", null)
+            return
+        }
+        try {
+            if (player.isPlaying) {
+                player.pause()
+            }
+            player.seekTo(0)
+            stopPlaybackPositionUpdates()
+            emitPlaybackStateEvent(state = "idle", reason = null)
+            emitPlaybackPositionEvent()
+            result.success(null)
+        } catch (e: Exception) {
+            emitPlaybackStateEvent(state = "error", reason = e.message)
+            result.error("STOP_FAILED", "Failed to stop playback: ${e.message}", null)
+        }
+    }
+
+    private fun seekTo(call: MethodCall, result: MethodChannel.Result) {
+        val positionMs = call.argument<Int>("positionMs")
+        if (positionMs == null) {
+            result.error("INVALID_ARGS", "positionMs is required", null)
+            return
+        }
+        val player = mediaPlayer
+        if (player == null) {
+            result.error("NO_PLAYER", "No audio loaded", null)
+            return
+        }
+        try {
+            player.seekTo(positionMs.coerceAtLeast(0))
+            emitPlaybackPositionEvent()
+            result.success(null)
+        } catch (e: Exception) {
+            emitPlaybackStateEvent(state = "error", reason = e.message)
+            result.error("SEEK_FAILED", "Failed to seek: ${e.message}", null)
+        }
+    }
+
+    private fun setVolume(call: MethodCall, result: MethodChannel.Result) {
+        val volume = call.argument<Double>("volume")
+        if (volume == null) {
+            result.error("INVALID_ARGS", "volume is required", null)
+            return
+        }
+        val player = mediaPlayer
+        if (player == null) {
+            result.error("NO_PLAYER", "No audio loaded", null)
+            return
+        }
+        try {
+            val v = volume.coerceIn(0.0, 1.0).toFloat()
+            player.setVolume(v, v)
+            result.success(null)
+        } catch (e: Exception) {
+            emitPlaybackStateEvent(state = "error", reason = e.message)
+            result.error("VOLUME_FAILED", "Failed to set volume: ${e.message}", null)
+        }
+    }
+
+    private fun setSpeed(call: MethodCall, result: MethodChannel.Result) {
+        val speed = call.argument<Double>("speed")
+        if (speed == null) {
+            result.error("INVALID_ARGS", "speed is required", null)
+            return
+        }
+        val player = mediaPlayer
+        if (player == null) {
+            result.error("NO_PLAYER", "No audio loaded", null)
+            return
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val params = player.playbackParams
+                params.speed = speed.coerceIn(0.5, 2.0).toFloat()
+                player.playbackParams = params
+                result.success(null)
+            } else {
+                result.error("UNSUPPORTED", "Playback speed requires API 23+", null)
+            }
+        } catch (e: Exception) {
+            emitPlaybackStateEvent(state = "error", reason = e.message)
+            result.error("SPEED_FAILED", "Failed to set speed: ${e.message}", null)
+        }
+    }
+
+    private fun startPlaybackPositionUpdates() {
+        if (playbackPositionHandler != null) return
+        playbackPositionThread = HandlerThread("PlaybackPositionThread").apply { start() }
+        playbackPositionHandler = Handler(playbackPositionThread!!.looper)
+        schedulePlaybackPositionPolling()
+    }
+
+    private fun stopPlaybackPositionUpdates() {
+        playbackPositionHandler?.removeCallbacksAndMessages(null)
+        playbackPositionThread?.quitSafely()
+        playbackPositionThread = null
+        playbackPositionHandler = null
+    }
+
+    private fun schedulePlaybackPositionPolling() {
+        playbackPositionHandler?.postDelayed({
+            val player = mediaPlayer
+            if (player != null && player.isPlaying) {
+                emitPlaybackPositionEvent()
+                schedulePlaybackPositionPolling()
+            } else {
+                emitPlaybackPositionEvent()
+            }
+        }, PLAYBACK_POSITION_INTERVAL_MS)
+    }
+
+    private fun emitPlaybackStateEvent(state: String, reason: String?) {
+        val event = mapOf(
+            "state" to state,
+            "filePath" to playbackFilePath,
+            "reason" to reason
+        )
+        playbackStateEventSink?.success(event)
+    }
+
+    private fun emitPlaybackPositionEvent() {
+        val player = mediaPlayer ?: return
+        val durationMs = try {
+            player.duration
+        } catch (_: Exception) {
+            0
+        }
+        val positionMs = try {
+            player.currentPosition
+        } catch (_: Exception) {
+            0
+        }
+        val event = mapOf(
+            "positionMs" to positionMs,
+            "durationMs" to durationMs,
+            "filePath" to (playbackFilePath ?: "")
+        )
+        playbackPositionEventSink?.success(event)
+    }
+
+    private class PlaybackStateStreamHandler(
+        private val plugin: AudioRecorderPlugin,
+    ) : EventChannel.StreamHandler {
+        override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
+            plugin.playbackStateEventSink = events
+        }
+
+        override fun onCancel(arguments: Any?) {
+            plugin.playbackStateEventSink = null
+        }
+    }
+
+    private class PlaybackPositionStreamHandler(
+        private val plugin: AudioRecorderPlugin,
+    ) : EventChannel.StreamHandler {
+        override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
+            plugin.playbackPositionEventSink = events
+        }
+
+        override fun onCancel(arguments: Any?) {
+            plugin.playbackPositionEventSink = null
+            plugin.stopPlaybackPositionUpdates()
+        }
+    }
+}

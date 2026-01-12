@@ -22,3 +22,11 @@ class AudioFileException implements Exception {
   @override
   String toString() => 'AudioFileException: $message';
 }
+
+class AudioPlaybackException implements Exception {
+  const AudioPlaybackException(this.message);
+  final String message;
+
+  @override
+  String toString() => 'AudioPlaybackException: $message';
+}

@@ -1,15 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_audio_recorder/features/audio_recorder/domain/models/recording_model.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../core/extension/extensions.dart';
+import 'audio_playback_dialog.dart';
 
-class RecordingsListWidget extends StatelessWidget {
+class RecordingsListWidget extends ConsumerWidget {
   const RecordingsListWidget({super.key, required this.recordings});
 
   final List<RecordingModel> recordings;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     if (recordings.isEmpty) {
       return const Center(child: Text('No recordings yet'));
     }
@@ -21,6 +23,14 @@ class RecordingsListWidget extends StatelessWidget {
         return _RecordingListItemWidget(
           key: ValueKey(recording.id),
           recording: recording,
+          onOpenDialog: () async {
+            await showDialog(
+              context: context,
+              barrierDismissible: true,
+              builder: (dialogContext) =>
+                  AudioPlaybackDialog(recording: recording),
+            );
+          },
         );
       },
     );
@@ -28,9 +38,14 @@ class RecordingsListWidget extends StatelessWidget {
 }
 
 class _RecordingListItemWidget extends StatelessWidget {
-  const _RecordingListItemWidget({super.key, required this.recording});
+  const _RecordingListItemWidget({
+    super.key,
+    required this.recording,
+    required this.onOpenDialog,
+  });
 
   final RecordingModel recording;
+  final VoidCallback onOpenDialog;
 
   @override
   Widget build(BuildContext context) {
@@ -40,6 +55,7 @@ class _RecordingListItemWidget extends StatelessWidget {
       title: Text(recording.fileName, overflow: TextOverflow.ellipsis),
       subtitle: Text(_subtitleText(recording)),
       isThreeLine: true,
+      onTap: onOpenDialog,
       trailing: IconButton(
         icon: const Icon(Icons.info_outline),
         onPressed: () => _showRecordingDetails(context, recording),

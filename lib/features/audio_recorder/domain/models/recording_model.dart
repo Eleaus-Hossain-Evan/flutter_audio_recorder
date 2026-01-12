@@ -21,6 +21,12 @@ class RecordingModel {
   /// Creation timestamp.
   final DateTime createdAt;
 
+  /// Pre-computed waveform visualization data.
+  ///
+  /// Contains normalized amplitude values (0.0-1.0) for each bar.
+  /// Null for legacy recordings created before waveform capture was implemented.
+  final List<double>? waveformData;
+
   const RecordingModel({
     required this.id,
     required this.filePath,
@@ -28,6 +34,7 @@ class RecordingModel {
     required this.durationMs,
     required this.sizeBytes,
     required this.createdAt,
+    this.waveformData,
   });
 
   /// Creates a [RecordingModel] from a map (platform channel response).
@@ -39,6 +46,9 @@ class RecordingModel {
       durationMs: map['durationMs'] as int,
       sizeBytes: map['sizeBytes'] as int,
       createdAt: DateTime.parse(map['createdAt'] as String),
+      waveformData: (map['waveformData'] as List<dynamic>?)
+          ?.map((e) => (e as num).toDouble())
+          .toList(),
     );
   }
 
@@ -51,6 +61,7 @@ class RecordingModel {
       'durationMs': durationMs,
       'sizeBytes': sizeBytes,
       'createdAt': createdAt.toIso8601String(),
+      'waveformData': waveformData,
     };
   }
 
@@ -62,6 +73,7 @@ class RecordingModel {
     int? durationMs,
     int? sizeBytes,
     DateTime? createdAt,
+    List<double>? waveformData,
   }) {
     return RecordingModel(
       id: id ?? this.id,
@@ -70,6 +82,7 @@ class RecordingModel {
       durationMs: durationMs ?? this.durationMs,
       sizeBytes: sizeBytes ?? this.sizeBytes,
       createdAt: createdAt ?? this.createdAt,
+      waveformData: waveformData ?? this.waveformData,
     );
   }
 
@@ -83,7 +96,8 @@ class RecordingModel {
         other.fileName == fileName &&
         other.durationMs == durationMs &&
         other.sizeBytes == sizeBytes &&
-        other.createdAt == createdAt;
+        other.createdAt == createdAt &&
+        _listEquals(other.waveformData, waveformData);
   }
 
   @override
@@ -95,11 +109,22 @@ class RecordingModel {
       durationMs,
       sizeBytes,
       createdAt,
+      Object.hashAll(waveformData ?? []),
     );
   }
 
   @override
   String toString() {
-    return 'RecordingEntity(id: $id, filePath: $filePath, fileName: $fileName, durationMs: $durationMs, sizeBytes: $sizeBytes, createdAt: $createdAt)';
+    return 'RecordingEntity(id: $id, filePath: $filePath, fileName: $fileName, durationMs: $durationMs, sizeBytes: $sizeBytes, createdAt: $createdAt, waveformData: ${waveformData?.length ?? 0} bars)';
+  }
+
+  /// Helper to compare nullable lists.
+  static bool _listEquals(List<double>? a, List<double>? b) {
+    if (a == null) return b == null;
+    if (b == null || a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 }

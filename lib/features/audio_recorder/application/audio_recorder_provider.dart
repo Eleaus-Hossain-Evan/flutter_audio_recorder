@@ -2,12 +2,16 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../../core/constant/recorder_status.dart';
+import '../../../core/constant/waveform_constants.dart';
 import '../../../core/exceptions/audio_exceptions.dart';
 import '../domain/i_audio_recorder_repo.dart';
+import '../domain/i_audio_recorder_stream_repo.dart';
+import '../domain/models/amplitude_sample.dart';
 import '../domain/models/recording_model.dart';
 import '../infrastructure/audio_recorder_method_channel.dart';
 import '../infrastructure/audio_recorder_repo.dart';
 import 'audio_recorder_state.dart';
+import 'waveform_processor_provider.dart';
 
 part 'audio_recorder_provider.g.dart';
 
@@ -25,8 +29,12 @@ IAudioRecorderRepo audioRecorderRepository(Ref ref) {
 /// Coordinates:
 /// - Command execution (requestPermission, startRecording, stopRecording)
 /// - Stream lifecycle (streams auto-cancel on stop/error)
+/// - Amplitude sample collection for waveform generation
 @riverpod
 class AudioRecorder extends _$AudioRecorder {
+  /// Captured amplitude samples for the current recording session.
+  final List<AmplitudeSample> _capturedSamples = [];
+
   @override
   AudioRecorderState build() {
     // Load recordings on init
@@ -87,10 +95,17 @@ class AudioRecorder extends _$AudioRecorder {
   /// On success, emits recording state and amplitude streams
   /// (via [recordingStateStreamProvider] and [amplitudeStreamProvider]).
   /// Streams auto-cancel when [stop] is called or on error.
+  /// Amplitude samples are captured for waveform generation.
   Future<void> start() async {
     try {
+      // Clear previous samples
+      _capturedSamples.clear();
+
       final repository = ref.read(audioRecorderRepositoryProvider);
       await repository.startRecording();
+
+      // Start collecting amplitude samples
+      _listenToAmplitudeStream();
 
       state = state.copyWith(
         status: RecorderStatus.recording,
@@ -112,14 +127,33 @@ class AudioRecorder extends _$AudioRecorder {
   /// Stops recording and adds the new recording to the list.
   ///
   /// Streams are canceled by the native layer when recording stops.
+  /// Amplitude samples are aggregated into waveform data before saving.
   Future<void> stop() async {
     try {
       final repository = ref.read(audioRecorderRepositoryProvider);
       final recording = await repository.stopRecording();
 
+      // Generate waveform from captured samples
+      List<double>? waveformData;
+      if (_capturedSamples.isNotEmpty) {
+        final processor = ref.read(waveformProcessorProvider);
+        waveformData = processor.aggregateSamples(
+          _capturedSamples,
+          WaveformConstants.kWaveformBars,
+        );
+      }
+
+      // Attach waveform to recording
+      final recordingWithWaveform = recording.copyWith(
+        waveformData: waveformData,
+      );
+
+      // Clear captured samples
+      _capturedSamples.clear();
+
       // Add new recording to the beginning of the list
       final updatedRecordings = <RecordingModel>[
-        recording,
+        recordingWithWaveform,
         ...state.recordings,
       ];
 
@@ -144,5 +178,21 @@ class AudioRecorder extends _$AudioRecorder {
   /// Refreshes the recordings list.
   Future<void> refresh() async {
     await _loadRecordings();
+  }
+
+  /// Listens to amplitude stream and captures samples for waveform generation.
+  void _listenToAmplitudeStream() {
+    final repository = ref.read(audioRecorderRepositoryProvider);
+    final streamRepo = repository as IAudioRecorderStreamRepository;
+
+    streamRepo.amplitudeStream().listen(
+      (sample) {
+        _capturedSamples.add(sample);
+      },
+      onError: (error) {
+        // Log error but don't stop recording
+        // Waveform will fallback to null if samples are empty
+      },
+    );
   }
 }

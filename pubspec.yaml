@@ -43,6 +43,12 @@ dependencies:
   flutter_hooks: ^0.20.5
   hooks_riverpod: ^2.6.1
 
+  # Audio playback
+  just_audio: ^0.9.46
+
+  # Responsive UI
+  flutter_screenutil: ^5.9.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -30,13 +30,14 @@ final audioRecorderRepositoryProvider =
 @Deprecated('Will be removed in 3.0. Use Ref instead')
 // ignore: unused_element
 typedef AudioRecorderRepositoryRef = AutoDisposeProviderRef<IAudioRecorderRepo>;
-String _$audioRecorderHash() => r'3a256af409bb83f7911bfbd700c00d9235b9ef18';
+String _$audioRecorderHash() => r'b88f70a0929a2afc060fb1b9936644e0aee57ebf';
 
 /// Audio recorder notifier that manages recording state.
 ///
 /// Coordinates:
 /// - Command execution (requestPermission, startRecording, stopRecording)
 /// - Stream lifecycle (streams auto-cancel on stop/error)
+/// - Amplitude sample collection for waveform generation
 ///
 /// Copied from [AudioRecorder].
 @ProviderFor(AudioRecorder)

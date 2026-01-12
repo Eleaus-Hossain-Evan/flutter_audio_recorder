@@ -2,10 +2,14 @@ import Flutter
 import UIKit
 import AVFoundation
 
-public class AudioRecorderPlugin: NSObject, FlutterPlugin {
+public class AudioRecorderPlugin: NSObject, FlutterPlugin, AVAudioPlayerDelegate {
     private var methodChannel: FlutterMethodChannel?
     private var stateEventChannel: FlutterEventChannel?
     private var amplitudeEventChannel: FlutterEventChannel?
+
+    private var playbackMethodChannel: FlutterMethodChannel?
+    private var playbackStateEventChannel: FlutterEventChannel?
+    private var playbackPositionEventChannel: FlutterEventChannel?
     
     private var audioRecorder: AVAudioRecorder?
     private var recordingStartTime: Date?
@@ -16,6 +20,12 @@ public class AudioRecorderPlugin: NSObject, FlutterPlugin {
     
     private var meringTimer: Timer?
     private var recordingInProgress = false
+
+    private var playbackPlayer: AVAudioPlayer?
+    private var playbackFilePath: String?
+    private var playbackStateSink: FlutterEventSink?
+    private var playbackPositionSink: FlutterEventSink?
+    private var playbackTimer: Timer?
     
     public static func register(with registrar: FlutterPluginRegistrar) {
         let methodChannel = FlutterMethodChannel(
@@ -30,15 +40,57 @@ public class AudioRecorderPlugin: NSObject, FlutterPlugin {
             name: "com.example.audio_recorder/events/amplitude",
             binaryMessenger: registrar.messenger()
         )
+
+        let playbackMethodChannel = FlutterMethodChannel(
+            name: "com.example.audio_player/methods",
+            binaryMessenger: registrar.messenger()
+        )
+        let playbackStateEventChannel = FlutterEventChannel(
+            name: "com.example.audio_player/events/state",
+            binaryMessenger: registrar.messenger()
+        )
+        let playbackPositionEventChannel = FlutterEventChannel(
+            name: "com.example.audio_player/events/position",
+            binaryMessenger: registrar.messenger()
+        )
         
         let instance = AudioRecorderPlugin()
         instance.methodChannel = methodChannel
         instance.stateEventChannel = stateEventChannel
         instance.amplitudeEventChannel = amplitudeEventChannel
+        instance.playbackMethodChannel = playbackMethodChannel
+        instance.playbackStateEventChannel = playbackStateEventChannel
+        instance.playbackPositionEventChannel = playbackPositionEventChannel
         
         registrar.addMethodCallDelegate(instance, channel: methodChannel)
-        stateEventChannel.setStreamHandler(instance)
-        amplitudeEventChannel.setStreamHandler(instance)
+        registrar.addMethodCallDelegate(instance, channel: playbackMethodChannel)
+
+        stateEventChannel.setStreamHandler(EventSinkHandler(
+            onListen: { sink in instance.stateEventSink = sink },
+            onCancel: {
+                instance.stateEventSink = nil
+            }
+        ))
+        amplitudeEventChannel.setStreamHandler(EventSinkHandler(
+            onListen: { sink in instance.amplitudeEventSink = sink },
+            onCancel: {
+                instance.amplitudeEventSink = nil
+                instance.stopAmplitudeMetering()
+            }
+        ))
+        playbackStateEventChannel.setStreamHandler(EventSinkHandler(
+            onListen: { sink in instance.playbackStateSink = sink },
+            onCancel: {
+                instance.playbackStateSink = nil
+            }
+        ))
+        playbackPositionEventChannel.setStreamHandler(EventSinkHandler(
+            onListen: { sink in instance.playbackPositionSink = sink },
+            onCancel: {
+                instance.playbackPositionSink = nil
+                instance.stopPlaybackPositionUpdates()
+            }
+        ))
     }
     
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -51,6 +103,20 @@ public class AudioRecorderPlugin: NSObject, FlutterPlugin {
             stopRecording(result: result)
         case "getRecordings":
             getRecordings(result: result)
+        case "loadLocal":
+            loadLocal(call: call, result: result)
+        case "play":
+            play(result: result)
+        case "pause":
+            pause(result: result)
+        case "stop":
+            stop(result: result)
+        case "seekTo":
+            seekTo(call: call, result: result)
+        case "setVolume":
+            setVolume(call: call, result: result)
+        case "setSpeed":
+            setSpeed(call: call, result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -322,34 +388,172 @@ public class AudioRecorderPlugin: NSObject, FlutterPlugin {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.string(from: Date())
     }
+
+    private func loadLocal(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let filePath = args["filePath"] as? String else {
+            result(FlutterError(code: "INVALID_ARGS", message: "filePath is required", details: nil))
+            return
+        }
+
+        stopPlaybackPositionUpdates()
+        playbackPlayer?.stop()
+        playbackPlayer = nil
+        playbackFilePath = filePath
+
+        emitPlaybackStateEvent(state: "loading", reason: nil)
+
+        let url = URL(fileURLWithPath: filePath)
+        do {
+            let player = try AVAudioPlayer(contentsOf: url)
+            player.enableRate = true
+            player.delegate = self
+            player.prepareToPlay()
+            playbackPlayer = player
+            emitPlaybackStateEvent(state: "paused", reason: nil)
+            emitPlaybackPositionEvent()
+            result(nil)
+        } catch {
+            emitPlaybackStateEvent(state: "error", reason: error.localizedDescription)
+            result(FlutterError(code: "LOAD_FAILED", message: "Failed to load audio: \(error.localizedDescription)", details: nil))
+        }
+    }
+
+    private func play(result: @escaping FlutterResult) {
+        guard let player = playbackPlayer else {
+            result(FlutterError(code: "NO_PLAYER", message: "No audio loaded", details: nil))
+            return
+        }
+        if player.play() {
+            emitPlaybackStateEvent(state: "playing", reason: nil)
+            startPlaybackPositionUpdates()
+            result(nil)
+        } else {
+            emitPlaybackStateEvent(state: "error", reason: "Failed to start playback")
+            result(FlutterError(code: "PLAY_FAILED", message: "Failed to start playback", details: nil))
+        }
+    }
+
+    private func pause(result: @escaping FlutterResult) {
+        guard let player = playbackPlayer else {
+            result(FlutterError(code: "NO_PLAYER", message: "No audio loaded", details: nil))
+            return
+        }
+        player.pause()
+        stopPlaybackPositionUpdates()
+        emitPlaybackStateEvent(state: "paused", reason: nil)
+        emitPlaybackPositionEvent()
+        result(nil)
+    }
+
+    private func stop(result: @escaping FlutterResult) {
+        playbackPlayer?.stop()
+        playbackPlayer?.currentTime = 0
+        stopPlaybackPositionUpdates()
+        emitPlaybackStateEvent(state: "idle", reason: nil)
+        emitPlaybackPositionEvent()
+        result(nil)
+    }
+
+    private func seekTo(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let positionMs = args["positionMs"] as? Int else {
+            result(FlutterError(code: "INVALID_ARGS", message: "positionMs is required", details: nil))
+            return
+        }
+        guard let player = playbackPlayer else {
+            result(FlutterError(code: "NO_PLAYER", message: "No audio loaded", details: nil))
+            return
+        }
+        player.currentTime = Double(positionMs) / 1000.0
+        emitPlaybackPositionEvent()
+        result(nil)
+    }
+
+    private func setVolume(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let volume = args["volume"] as? Double else {
+            result(FlutterError(code: "INVALID_ARGS", message: "volume is required", details: nil))
+            return
+        }
+        guard let player = playbackPlayer else {
+            result(FlutterError(code: "NO_PLAYER", message: "No audio loaded", details: nil))
+            return
+        }
+        player.volume = Float(max(0.0, min(1.0, volume)))
+        result(nil)
+    }
+
+    private func setSpeed(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let speed = args["speed"] as? Double else {
+            result(FlutterError(code: "INVALID_ARGS", message: "speed is required", details: nil))
+            return
+        }
+        guard let player = playbackPlayer else {
+            result(FlutterError(code: "NO_PLAYER", message: "No audio loaded", details: nil))
+            return
+        }
+        player.rate = Float(max(0.5, min(2.0, speed)))
+        result(nil)
+    }
+
+    private func startPlaybackPositionUpdates() {
+        stopPlaybackPositionUpdates()
+        playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.emitPlaybackPositionEvent()
+        }
+    }
+
+    private func stopPlaybackPositionUpdates() {
+        playbackTimer?.invalidate()
+        playbackTimer = nil
+    }
+
+    private func emitPlaybackStateEvent(state: String, reason: String?) {
+        let event: [String: Any?] = [
+            "state": state,
+            "filePath": playbackFilePath,
+            "reason": reason
+        ]
+        playbackStateSink?(event)
+    }
+
+    private func emitPlaybackPositionEvent() {
+        guard let player = playbackPlayer else { return }
+        let positionMs = Int(player.currentTime * 1000.0)
+        let durationMs = Int(player.duration * 1000.0)
+        let event: [String: Any] = [
+            "positionMs": positionMs,
+            "durationMs": durationMs,
+            "filePath": playbackFilePath ?? ""
+        ]
+        playbackPositionSink?(event)
+    }
+
+    public func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        stopPlaybackPositionUpdates()
+        emitPlaybackPositionEvent()
+        emitPlaybackStateEvent(state: "completed", reason: flag ? nil : "Playback did not complete successfully")
+    }
 }
 
-// MARK: - FlutterStreamHandler Implementation
+final class EventSinkHandler: NSObject, FlutterStreamHandler {
+    private let onListenCallback: (FlutterEventSink) -> Void
+    private let onCancelCallback: () -> Void
 
-extension AudioRecorderPlugin: FlutterStreamHandler {
-    public func onListen(
-        withArguments arguments: Any?,
-        eventSink events: @escaping FlutterEventSink
-    ) -> FlutterError? {
-        // Determine which stream this is by checking the current event sink
-        // This is a simplification; in production, use a named handler per channel
-        if stateEventSink == nil {
-            stateEventSink = events
-        } else {
-            amplitudeEventSink = events
-        }
+    init(onListen: @escaping (FlutterEventSink) -> Void, onCancel: @escaping () -> Void) {
+        self.onListenCallback = onListen
+        self.onCancelCallback = onCancel
+    }
+
+    func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+        onListenCallback(events)
         return nil
     }
-    
-    public func onCancel(withArguments arguments: Any?) -> FlutterError? {
-        // Cleanup on stream cancellation
-        if amplitudeEventSink != nil {
-            amplitudeEventSink = nil
-            stopAmplitudeMetering()
-        } else {
-            stateEventSink = nil
-        }
+
+    func onCancel(withArguments arguments: Any?) -> FlutterError? {
+        onCancelCallback()
         return nil
     }
 }
-
