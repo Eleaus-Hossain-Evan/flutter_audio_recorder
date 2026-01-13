@@ -1,8 +1,12 @@
 package com.example.flutter_audio_recorder
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.MediaPlayer
 import android.media.MediaMetadataRetriever
 import android.media.MediaRecorder
@@ -24,7 +28,8 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, ActivityAware,
-    PluginRegistry.RequestPermissionsResultListener, EventChannel.StreamHandler {
+    PluginRegistry.RequestPermissionsResultListener, PluginRegistry.ActivityResultListener,
+    EventChannel.StreamHandler {
 
     private lateinit var channel: MethodChannel
     private var stateEventChannel: EventChannel? = null
@@ -38,6 +43,13 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
     private var mediaRecorder: MediaRecorder? = null
     private var currentRecordingPath: String? = null
     private var recordingStartTime: Long = 0
+    
+    // Dual-stream recording (mic + app audio)
+    private var micAudioRecord: AudioRecord? = null
+    private var mediaProjectionHelper: MediaProjectionHelper? = null
+    private var audioMixer: AudioMixer? = null
+    private var isDualStreamRecording = false
+    private var pendingMediaProjectionResult: MethodChannel.Result? = null
     
     private var permissionResult: MethodChannel.Result? = null
     
@@ -63,6 +75,7 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
         private const val PLAYBACK_STATE_EVENT_CHANNEL_NAME = "com.example.audio_player/events/state"
         private const val PLAYBACK_POSITION_EVENT_CHANNEL_NAME = "com.example.audio_player/events/position"
         private const val PERMISSION_REQUEST_CODE = 1001
+        private const val MEDIA_PROJECTION_REQUEST_CODE = 1002
         private const val AMPLITUDE_POLLING_INTERVAL_MS = 20L  // ~50 Hz
         private const val PLAYBACK_POSITION_INTERVAL_MS = 100L
     }
@@ -106,27 +119,33 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
         activityBinding = binding
         binding.addRequestPermissionsResultListener(this)
+        binding.addActivityResultListener(this)
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
         activityBinding?.removeRequestPermissionsResultListener(this)
+        activityBinding?.removeActivityResultListener(this)
         activityBinding = null
     }
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
         activityBinding = binding
         binding.addRequestPermissionsResultListener(this)
+        binding.addActivityResultListener(this)
     }
 
     override fun onDetachedFromActivity() {
         activityBinding?.removeRequestPermissionsResultListener(this)
+        activityBinding?.removeActivityResultListener(this)
         activityBinding = null
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "requestPermission" -> requestPermission(result)
-            "startRecording" -> startRecording(result)
+            "supportsInternalAudioCapture" -> supportsInternalAudioCapture(result)
+            "requestMediaProjectionPermission" -> requestMediaProjectionPermission(result)
+            "startRecording" -> startRecording(call, result)
             "stopRecording" -> stopRecording(result)
             "getRecordings" -> getRecordings(result)
             "loadLocal" -> loadLocal(call, result)
@@ -179,7 +198,62 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
         return false
     }
 
-    private fun startRecording(result: MethodChannel.Result) {
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        if (requestCode == MEDIA_PROJECTION_REQUEST_CODE) {
+            handleMediaProjectionResult(resultCode, data)
+            return true
+        }
+        return false
+    }
+
+    private fun supportsInternalAudioCapture(result: MethodChannel.Result) {
+        result.success(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+    }
+
+    private fun requestMediaProjectionPermission(result: MethodChannel.Result) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            result.error("UNSUPPORTED", "MediaProjection requires Android 10+", null)
+            return
+        }
+
+        val activity = activityBinding?.activity
+        if (activity == null) {
+            result.error("NO_ACTIVITY", "Activity is null", null)
+            return
+        }
+
+        try {
+            val helper = MediaProjectionHelper(activity)
+            val intent = helper.createScreenCaptureIntent()
+            pendingMediaProjectionResult = result
+            activity.startActivityForResult(intent, MEDIA_PROJECTION_REQUEST_CODE)
+        } catch (e: Exception) {
+            result.error("REQUEST_FAILED", "Failed to request MediaProjection: ${e.message}", null)
+        }
+    }
+
+    // Handle MediaProjection permission result
+    private fun handleMediaProjectionResult(resultCode: Int, data: Intent?) {
+        val result = pendingMediaProjectionResult ?: return
+        pendingMediaProjectionResult = null
+
+        if (resultCode == Activity.RESULT_OK && data != null) {
+            // Store the result for later use in startRecording
+            val ctx = context ?: run {
+                result.error("NO_CONTEXT", "Context is null", null)
+                return
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                AudioCaptureService.startService(ctx, resultCode, data)
+            }
+            result.success(true)
+        } else {
+            result.error("PERMISSION_DENIED", "MediaProjection permission denied", null)
+        }
+    }
+
+    private fun startRecording(call: MethodCall, result: MethodChannel.Result) {
         val ctx = context ?: run {
             result.error("NO_CONTEXT", "Context is null", null)
             return
@@ -190,6 +264,8 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
             result.error("PERMISSION_DENIED", "Microphone permission not granted", null)
             return
         }
+
+        val captureAppAudio = call.argument<Boolean>("captureAppAudio") ?: false
 
         try {
             // Emit initializing state
@@ -209,30 +285,14 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
             currentRecordingPath = file.absolutePath
             recordingStartTime = timestamp
 
-            // Initialize MediaRecorder
-            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                MediaRecorder(ctx)
+            if (captureAppAudio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q 
+                && AudioCaptureService.isRunning()) {
+                // Dual-stream recording (mic + app audio)
+                startDualStreamRecording(file, result)
             } else {
-                @Suppress("DEPRECATION")
-                MediaRecorder()
-            }.apply {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
-                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setOutputFile(currentRecordingPath)
-                prepare()
-                start()
+                // Standard mic-only recording with optimization
+                startMicOnlyRecording(file, result)
             }
-
-            recordingInProgress = true
-            
-            // Emit recording state
-            emitRecordingStateEvent(state = "recording", reason = null)
-            
-            // Start amplitude metering
-            startAmplitudeMetering()
-
-            result.success(null)
         } catch (e: Exception) {
             recordingInProgress = false
             emitRecordingStateEvent(state = "error", reason = e.message)
@@ -240,11 +300,90 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
         }
     }
 
+    private fun startMicOnlyRecording(file: File, result: MethodChannel.Result) {
+        val ctx = context ?: throw IllegalStateException("Context is null")
+
+        mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            MediaRecorder(ctx)
+        } else {
+            @Suppress("DEPRECATION")
+            MediaRecorder()
+        }.apply {
+            // Use VOICE_COMMUNICATION for VoIP optimization on Android 10+
+            val audioSource = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION
+            } else {
+                MediaRecorder.AudioSource.MIC
+            }
+            setAudioSource(audioSource)
+            setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            setOutputFile(file.absolutePath)
+            prepare()
+            start()
+        }
+
+        isDualStreamRecording = false
+        recordingInProgress = true
+        emitRecordingStateEvent(state = "recording", reason = null)
+        startAmplitudeMetering()
+        result.success(null)
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+    private fun startDualStreamRecording(file: File, result: MethodChannel.Result) {
+        val ctx = context ?: throw IllegalStateException("Context is null")
+
+        try {
+            // Create microphone AudioRecord
+            val sampleRate = 44100
+            val channelConfig = AudioFormat.CHANNEL_IN_MONO
+            val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+            val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+
+            micAudioRecord = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                sampleRate,
+                channelConfig,
+                audioFormat,
+                bufferSize * 2
+            )
+
+            // Get MediaProjection helper from service
+            mediaProjectionHelper = MediaProjectionHelper(ctx)
+            val appAudioRecord = mediaProjectionHelper?.createAudioPlaybackCapture()
+
+            if (appAudioRecord == null) {
+                throw RuntimeException("Failed to create AudioPlaybackCapture")
+            }
+
+            // Start both recordings
+            micAudioRecord?.startRecording()
+            mediaProjectionHelper?.startCapture()
+
+            // Create mixer
+            audioMixer = AudioMixer(file, micAudioRecord!!, appAudioRecord)
+            audioMixer?.startMixing()
+
+            isDualStreamRecording = true
+            recordingInProgress = true
+            emitRecordingStateEvent(state = "recording", reason = null)
+            startAmplitudeMetering()
+            result.success(null)
+        } catch (e: Exception) {
+            // Cleanup on failure
+            micAudioRecord?.release()
+            micAudioRecord = null
+            mediaProjectionHelper?.release()
+            mediaProjectionHelper = null
+            throw e
+        }
+    }
+
     private fun stopRecording(result: MethodChannel.Result) {
-        val recorder = mediaRecorder
         val recordingPath = currentRecordingPath
 
-        if (recorder == null || recordingPath == null) {
+        if (recordingPath == null || !recordingInProgress) {
             result.error("NO_RECORDING", "No recording in progress", null)
             return
         }
@@ -256,9 +395,25 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
             // Emit stopping state
             emitRecordingStateEvent(state = "stopping", reason = null)
             
-            recorder.stop()
-            recorder.release()
-            mediaRecorder = null
+            if (isDualStreamRecording) {
+                // Stop dual-stream recording
+                audioMixer?.stopMixing()
+                audioMixer = null
+                
+                micAudioRecord?.stop()
+                micAudioRecord?.release()
+                micAudioRecord = null
+                
+                mediaProjectionHelper?.release()
+                mediaProjectionHelper = null
+                
+                isDualStreamRecording = false
+            } else {
+                // Stop standard recording
+                mediaRecorder?.stop()
+                mediaRecorder?.release()
+                mediaRecorder = null
+            }
 
             val file = File(recordingPath)
             if (!file.exists()) {
@@ -278,10 +433,17 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
             
             result.success(metadata)
         } catch (e: Exception) {
+            // Cleanup on error
             mediaRecorder?.release()
             mediaRecorder = null
+            micAudioRecord?.release()
+            micAudioRecord = null
+            audioMixer = null
+            mediaProjectionHelper?.release()
+            mediaProjectionHelper = null
             currentRecordingPath = null
             recordingInProgress = false
+            isDualStreamRecording = false
             emitRecordingStateEvent(state = "error", reason = e.message)
             result.error("STOP_FAILED", "Failed to stop recording: ${e.message}", null)
         }
@@ -370,16 +532,20 @@ class AudioRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
     }
     
     private fun emitAmplitudeSample() {
-        val recorder = mediaRecorder ?: return
-        
         try {
-            // Get max amplitude (0-32767)
-            val maxAmplitude = recorder.maxAmplitude.toDouble()
+            val normalizedAmplitude = if (isDualStreamRecording) {
+                // For dual-stream, use mic AudioRecord
+                val recorder = micAudioRecord ?: return
+                // AudioRecord doesn't have built-in amplitude, use a simple estimation
+                // In production, you might want to sample the audio buffer
+                0.5 // Placeholder - would need actual buffer sampling
+            } else {
+                // For standard recording, use MediaRecorder's max amplitude
+                val recorder = mediaRecorder ?: return
+                val maxAmplitude = recorder.maxAmplitude.toDouble()
+                (maxAmplitude / 32767.0).coerceIn(0.0, 1.0)
+            }
             
-            // Normalize: 0 → 0.0, 32767 → 1.0
-            val normalizedAmplitude = (maxAmplitude / 32767.0).coerceIn(0.0, 1.0)
-            
-            // Emit as raw double
             amplitudeEventSink?.success(normalizedAmplitude)
         } catch (e: Exception) {
             // Silently skip if recorder state is invalid

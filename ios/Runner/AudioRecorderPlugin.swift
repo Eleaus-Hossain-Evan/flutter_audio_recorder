@@ -146,10 +146,19 @@ public class AudioRecorderPlugin: NSObject, FlutterPlugin, AVAudioPlayerDelegate
             // Emit initializing state
             emitRecordingStateEvent(state: "initializing", timestamp: currentISO8601(), reason: nil)
             
-            // Configure audio session
+            // Configure audio session for VoIP with optimizations
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playAndRecord, mode: .default)
-            try audioSession.setActive(true)
+            try audioSession.setCategory(
+                .playAndRecord,
+                mode: .voiceChat,  // Optimized for VoIP: echo cancellation, noise suppression
+                options: [
+                    .allowBluetooth,
+                    .allowBluetoothA2DP,
+                    .defaultToSpeaker,
+                    .mixWithOthers
+                ]
+            )
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
             
             // Generate unique filename
             let uuid = UUID().uuidString.prefix(8)
